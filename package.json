@@ -1,0 +1,12 @@
+{
+  "name": "cp-rewards-server",
+  "version": "1.0.0",
+  "description": "CP Rewards Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
