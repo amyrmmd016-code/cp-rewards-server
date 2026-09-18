@@ -1,12 +1,22 @@
 const express = require("express");
-const cors = require("cors");
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+// CORS بدون نیاز به نصب cors
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -104,21 +114,13 @@ app.post("/api/orders", async (req, res) => {
     });
 
   } catch (error) {
-    console.error(error);
+    console.error("Order error:", error);
 
     res.status(500).json({
       success: false,
       message: "خطا در ثبت سفارش"
     });
   }
-});
-
-// دریافت سفارش‌ها
-app.get("/api/orders", (req, res) => {
-  res.json({
-    success: true,
-    message: "Orders endpoint is working"
-  });
 });
 
 app.listen(PORT, () => {
