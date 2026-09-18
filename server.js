@@ -1,83 +1,124 @@
 const express = require("express");
+const cors = require("cors");
 
 const app = express();
+
+app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// دیتای آزمایشی
-const users = {};
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+// صفحه اصلی
 app.get("/", (req, res) => {
   res.json({
     status: "online",
-    message: "CP Rewards Server is running"
+    message: "سرور پاداش CP در حال اجرا است"
   });
 });
 
-// ساخت کاربر
-app.post("/api/user", (req, res) => {
-  const { userId } = req.body;
-
-  if (!userId) {
-    return res.status(400).json({
-      error: "userId is required"
-    });
-  }
-
-  if (!users[userId]) {
-    users[userId] = {
-      ads: 0,
-      tickets: 0
-    };
-  }
-
-  res.json(users[userId]);
+// تست سرور
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok"
+  });
 });
 
-// ثبت تبلیغ تکمیل‌شده
-app.post("/api/ad-completed", (req, res) => {
-  const { userId } = req.body;
+// ارسال سفارش به تلگرام
+async function sendTelegram(order) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.log("Telegram variables are not configured.");
+    return;
+  }
 
-  if (!userId) {
-    return res.status(400).json({
-      error: "userId is required"
+  const message =
+`🛒 سفارش جدید CP
+
+🆔 شماره سفارش:
+${order.id}
+
+👤 Player ID:
+${order.playerID}
+
+💰 مقدار CP:
+${order.cp}
+
+📦 بسته:
+${order.packageName}
+
+⏰ زمان:
+${order.createdAt}`;
+
+  const response = await fetch(
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!data.ok) {
+    console.log("Telegram error:", data.description);
+  }
+}
+
+// ثبت سفارش
+app.post("/api/orders", async (req, res) => {
+  try {
+    const { playerID, cp, packageName } = req.body;
+
+    if (!playerID || !cp) {
+      return res.status(400).json({
+        success: false,
+        message: "Player ID و مقدار CP الزامی است."
+      });
+    }
+
+    const order = {
+      id: "CP-" + Date.now(),
+      playerID: String(playerID),
+      cp: String(cp),
+      packageName: packageName || `${cp} CP`,
+      status: "pending",
+      createdAt: new Date().toISOString()
+    };
+
+    console.log("New order:", order);
+
+    await sendTelegram(order);
+
+    res.json({
+      success: true,
+      message: "سفارش ثبت شد.",
+      order: order
+    });
+
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      success: false,
+      message: "خطا در ثبت سفارش"
     });
   }
+});
 
-  if (!users[userId]) {
-    users[userId] = {
-      ads: 0,
-      tickets: 0
-    };
-  }
-
-  users[userId].ads++;
-
-  // هر 200 تبلیغ = یک بلیت قرعه‌کشی
-  if (users[userId].ads % 200 === 0) {
-    users[userId].tickets++;
-  }
-
+// دریافت سفارش‌ها
+app.get("/api/orders", (req, res) => {
   res.json({
     success: true,
-    ads: users[userId].ads,
-    tickets: users[userId].tickets
+    message: "Orders endpoint is working"
   });
-});
-
-// دریافت وضعیت کاربر
-app.get("/api/user/:userId", (req, res) => {
-  const user = users[req.params.userId];
-
-  if (!user) {
-    return res.json({
-      ads: 0,
-      tickets: 0
-    });
-  }
-
-  res.json(user);
 });
 
 app.listen(PORT, () => {
