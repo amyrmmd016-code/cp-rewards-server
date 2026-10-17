@@ -1,330 +1,249 @@
+
 const express = require("express");
+const cors = require("cors");
+const TelegramBot = require("node-telegram-bot-api");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+app.use(cors());
+app.use(express.json({ limit: "10mb" }));
 
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const ADMIN_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
+let bot = null;
+const payments = new Map();
 
-  next();
-});
+if (BOT_TOKEN && ADMIN_CHAT_ID) {
+  bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-app.use(express.json());
+  bot.on("polling_error", (error) => {
+    console.error("Telegram polling error:", error.message);
+  });
 
+  bot.on("callback_query", async (query) => {
+    const data = query.data || "";
+    const parts = data.split(":");
 
-// ==============================
-// مسابقات
-// ==============================
+    if (parts.length !== 3 || parts[0] !== "payment") {
+      return;
+    }
 
-const customs = [
-  {
-    id: "paid-custom",
-    type: "paid",
-    title: "کاستوم جایزه‌دار پولی",
-    prize: "۵۰۰٬۰۰۰ تومان",
-    capacity: 100,
-    map: "Nuketown",
-    day: "پنجشنبه",
-    entry: "فعلاً رایگان"
-  },
-  {
-    id: "free-custom",
-    type: "free",
-    title: "کاستوم جایزه‌دار رایگان",
-    prize: "۲۰۰٬۰۰۰ تومان",
-    capacity: 100,
-    map: "Shipment",
-    day: "پنجشنبه",
-    entry: "رایگان"
-  }
-];
+    const [, action, paymentId] = parts;
 
-const registrations = [];
+    if (String(query.from.id) !== String(ADMIN_CHAT_ID)) {
+      await bot.answerCallbackQuery(query.id, {
+        text: "اجازه دسترسی ندارید."
+      });
+      return;
+    }
 
+    const payment = payments.get(paymentId);
 
-// ==============================
-// وضعیت
-// ==============================
+    if (!payment) {
+      await bot.answerCallbackQuery(query.id, {
+        text: "درخواست پیدا نشد یا سرور دوباره راه‌اندازی شده است."
+      });
+      return;
+    }
+
+    if (payment.status !== "pending") {
+      await bot.answerCallbackQuery(query.id, {
+        text: "این درخواست قبلاً بررسی شده است."
+      });
+      return;
+    }
+
+    if (action !== "approve" && action !== "reject") {
+      return;
+    }
+
+    payment.status = action === "approve" ? "approved" : "rejected";
+    payment.reviewedAt = new Date().toISOString();
+
+    try {
+      await bot.editMessageReplyMarkup(
+        { inline_keyboard: [] },
+        {
+          chat_id: ADMIN_CHAT_ID,
+          message_id: query.message.message_id
+        }
+      );
+    } catch (error) {
+      console.error("Could not update Telegram message:", error.message);
+    }
+
+    await bot.answerCallbackQuery(query.id, {
+      text: action === "approve" ? "پرداخت تأیید شد." : "پرداخت رد شد."
+    });
+
+    await bot.sendMessage(
+      ADMIN_CHAT_ID,
+      action === "approve"
+        ? `✅ پرداخت ${paymentId} تأیید شد.`
+        : `❌ پرداخت ${paymentId} رد شد.`
+    );
+  });
+}
 
 app.get("/", (req, res) => {
   res.json({
     status: "online",
-    message: "CP HUB SERVER"
+    message: "سرور CP HUB فعال است"
   });
 });
 
 app.get("/health", (req, res) => {
-  res.json({
-    status: "ok"
-  });
+  res.json({ status: "online" });
 });
 
+// ثبت درخواست پرداخت و ارسال رسید برای مدیر
+app.post("/api/payments", async (req, res) => {
+  try {
+    if (!bot) {
+      return res.status(503).json({
+        success: false,
+        message: "ربات تلگرام تنظیم نشده است."
+      });
+    }
 
-// ==============================
-// لیست کاستوم‌ها
-// ==============================
+    const { userId, amount, receiptBase64, note } = req.body || {};
 
-app.get("/api/customs", (req, res) => {
+    if (!userId || !amount || !receiptBase64) {
+      return res.status(400).json({
+        success: false,
+        message: "شناسه کاربر، مبلغ و تصویر رسید الزامی هستند."
+      });
+    }
 
-  const result = customs.map(custom => {
+    const parsedAmount = Number(amount);
 
-    const players = registrations.filter(
-      x => x.customId === custom.id
+    if (!Number.isSafeInteger(parsedAmount) || parsedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "مبلغ پرداخت معتبر نیست."
+      });
+    }
+
+    if (
+      typeof receiptBase64 !== "string" ||
+      receiptBase64.length > 8 * 1024 * 1024
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "تصویر رسید معتبر نیست یا بیش از حد بزرگ است."
+      });
+    }
+
+    const match = receiptBase64.match(
+      /^data:image\/(jpeg|jpg|png|webp);base64,([A-Za-z0-9+/=\r\n]+)$/i
     );
 
-    return {
-      ...custom,
-      registered: players.length,
-      remaining: custom.capacity - players.length
+    if (!match) {
+      return res.status(400).json({
+        success: false,
+        message: "رسید باید تصویر JPG، PNG یا WEBP باشد."
+      });
+    }
+
+    const imageBuffer = Buffer.from(match[2], "base64");
+
+    if (!imageBuffer.length || imageBuffer.length > 5 * 1024 * 1024) {
+      return res.status(400).json({
+        success: false,
+        message: "حجم تصویر باید حداکثر ۵ مگابایت باشد."
+      });
+    }
+
+    const paymentId = crypto.randomUUID();
+
+    const payment = {
+      id: paymentId,
+      userId: String(userId),
+      amount: parsedAmount,
+      status: "pending",
+      createdAt: new Date().toISOString()
     };
 
-  });
+    payments.set(paymentId, payment);
 
-  res.json(result);
+    const caption = [
+      "💳 درخواست جدید پرداخت CP HUB",
+      "",
+      `🆔 شناسه درخواست: ${paymentId}`,
+      `👤 شناسه کاربر: ${payment.userId}`,
+      `💰 مبلغ: ${parsedAmount.toLocaleString("fa-IR")} تومان`,
+      note ? `📝 توضیحات: ${String(note).slice(0, 300)}` : "",
+      "",
+      "لطفاً رسید را بررسی کن."
+    ].filter(Boolean).join("\n");
+
+    await bot.sendPhoto(
+      ADMIN_CHAT_ID,
+      imageBuffer,
+      {
+        caption,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "✅ تأیید پرداخت",
+                callback_data: `payment:approve:${paymentId}`
+              },
+              {
+                text: "❌ رد پرداخت",
+                callback_data: `payment:reject:${paymentId}`
+              }
+            ]
+          ]
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      paymentId,
+      status: payment.status,
+      message: "رسید برای مدیر ارسال شد."
+    });
+  } catch (error) {
+    console.error("Payment request error:", error.message);
+
+    res.status(500).json({
+      success: false,
+      message: "ارسال درخواست پرداخت ناموفق بود."
+    });
+  }
 });
 
+// بررسی وضعیت پرداخت توسط برنامه
+app.get("/api/payments/:id/status", (req, res) => {
+  const payment = payments.get(req.params.id);
 
-// ==============================
-// بازیکنان کاستوم
-// ==============================
-
-app.get("/api/customs/:id/players", (req, res) => {
-
-  const custom = customs.find(
-    x => x.id === req.params.id
-  );
-
-  if (!custom) {
+  if (!payment) {
     return res.status(404).json({
       success: false,
-      message: "کاستوم پیدا نشد."
+      message: "درخواست پیدا نشد."
     });
   }
 
-  const players = registrations
-    .filter(x => x.customId === custom.id)
-    .sort((a, b) => a.number - b.number);
-
-  const slots = [];
-
-  for (let i = 1; i <= 100; i++) {
-
-    const player = players.find(
-      x => x.number === i
-    );
-
-    slots.push({
-      number: i,
-      playerId: player ? player.playerId : null,
-      avatar: player ? player.avatar : null
+  if (String(req.query.userId || "") !== payment.userId) {
+    return res.status(403).json({
+      success: false,
+      message: "دسترسی مجاز نیست."
     });
   }
 
   res.json({
     success: true,
-    players: slots
+    paymentId: payment.id,
+    status: payment.status
   });
 });
-
-
-// ==============================
-// ثبت نام
-// ==============================
-
-app.post("/api/customs/:id/join", async (req, res) => {
-
-  try {
-
-    const custom = customs.find(
-      x => x.id === req.params.id
-    );
-
-    if (!custom) {
-      return res.status(404).json({
-        success: false,
-        message: "کاستوم پیدا نشد."
-      });
-    }
-
-    const playerId = String(
-      req.body.playerId || ""
-    ).trim();
-
-    const avatar = String(
-      req.body.avatar || "🎮"
-    );
-
-    if (!playerId) {
-      return res.status(400).json({
-        success: false,
-        message: "Player ID وارد نشده."
-      });
-    }
-
-    const alreadyRegistered = registrations.some(
-      x =>
-        x.customId === custom.id &&
-        x.playerId === playerId
-    );
-
-    if (alreadyRegistered) {
-      return res.status(400).json({
-        success: false,
-        message: "این Player ID قبلاً ثبت شده."
-      });
-    }
-
-    const currentPlayers = registrations.filter(
-      x => x.customId === custom.id
-    );
-
-    if (currentPlayers.length >= custom.capacity) {
-      return res.status(400).json({
-        success: false,
-        message: "ظرفیت تکمیل شده."
-      });
-    }
-
-    const registration = {
-
-      id: "REG-" + Date.now(),
-
-      customId: custom.id,
-
-      playerId: playerId,
-
-      avatar: avatar,
-
-      number: currentPlayers.length + 1,
-
-      time: new Date().toISOString()
-    };
-
-    registrations.push(registration);
-
-
-    // ==============================
-    // تلگرام
-    // ==============================
-
-    if (
-      TELEGRAM_BOT_TOKEN &&
-      TELEGRAM_CHAT_ID
-    ) {
-
-      const message = `
-🎮 ثبت نام جدید CP HUB
-
-🏆 مسابقه:
-${custom.title}
-
-💰 جایزه:
-${custom.prize}
-
-🗺 مپ:
-${custom.map}
-
-👤 شماره:
-${registration.number}/100
-
-🆔 Player ID:
-${playerId}
-
-🎭 پروفایل:
-${avatar}
-
-💵 ورودی:
-${custom.entry}
-
-⏰ زمان:
-${new Date().toLocaleString(
-  "fa-IR",
-  {
-    timeZone: "Asia/Tehran"
-  }
-)}
-`;
-
-      try {
-
-        await fetch(
-          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-          {
-            method: "POST",
-
-            headers: {
-              "Content-Type": "application/json"
-            },
-
-            body: JSON.stringify({
-              chat_id: TELEGRAM_CHAT_ID,
-              text: message
-            })
-          }
-        );
-
-      } catch (telegramError) {
-
-        console.log(
-          "Telegram error:",
-          telegramError.message
-        );
-
-      }
-    }
-
-
-    res.json({
-
-      success: true,
-
-      message: "ثبت نام موفق بود.",
-
-      registration: registration
-
-    });
-
-  } catch (error) {
-
-    console.log(error);
-
-    res.status(500).json({
-      success: false,
-      message: "خطای سرور."
-    });
-
-  }
-
-});
-
-
-// ==============================
-// 404
-// ==============================
-
-app.use((req, res) => {
-
-  res.status(404).json({
-    success: false,
-    message: "مسیر پیدا نشد."
-  });
-
-});
-
 
 app.listen(PORT, () => {
-
-  console.log(
-    `CP HUB SERVER running on ${PORT}`
-  );
-
+  console.log(`CP HUB server running on port ${PORT}`);
 });
+                                    
