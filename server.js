@@ -13,93 +13,192 @@ app.use(express.json({ limit: "10mb" }));
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-let bot = null;
+// کدهای ساخته‌شده توسط پشتیبانی بازار
+const discountCodes = [
+  "J1F5Q6CCZ2", "AI67VXFB8M", "YGVC3RFIA3",
+  "XQRFJD84RB", "WQ10YS0WKV", "GOGX2VRDGC",
+  "Z5NO12WYXB", "CLSTZ4X8OE", "2PCZ0799YR",
+  "LZWFNN8U8D", "25UD9QTOUD", "XVA1M4TYYY",
+  "YMUN0X0T1Q", "9E11976BDC", "T5ZAZAB721",
+  "65UBH8K0N0", "08NGIIG6O2", "W3P5SDK936",
+  "E3NGG457AG", "2ZEVBZS2HF", "8UXWKIRWJV",
+  "3H4GNJBGDN", "0CVRSM3RAN", "WAH2JK0V21",
+  "E1CPLYFZWS", "UTFFLNUWU6", "PRG7E9Z5IP",
+  "I779NXO1FM", "STV43YYY5X", "497CU2B76P",
+  "5PW8NP0PU1", "615YGUZ110", "OJCPBEB4ST",
+  "E0AZ2LJT13", "2J3Y2PKQ50", "CLPBUFRMUA",
+  "SLTEE2FC1H", "FT0EPZMKZQ", "ABQ4TPHUM3",
+  "SUVQCB9UC9", "BU68UUWF7J", "SGIQVIJ7N4",
+  "JOUPIOJJB1", "27HIFIACJB", "BE3G2UUW4A",
+  "U8VPVG141N", "S9NKVG9PNT", "702CFT6A79",
+  "O4SA0K4FGN", "F5473GRNGK", "DQ3U49SPTG",
+  "R52QIC9NLC", "CGWV3I10MH", "NFQ2KAHGGV",
+  "ZRTTLL3IR9", "22CW4WG0M5", "BYHAWPW6F4",
+  "ZAO6904AQW", "2ODCS5UIJI", "THPQVDDXCU",
+  "O610EBN0VQ", "8EQ7A2PJ0N", "Z4G4WT9ZKU",
+  "WJRU89W5H5", "6KJ3D5K7BF", "G6D4Z520FK",
+  "YG04DI0FKB", "LBTKUIF3XY", "BINJJQCKZH",
+  "WVNIYKVEM0", "1B0JOH0PWZ", "KRQEUX8QPT",
+  "KEXXJY0F57", "VBRFEXGMLM", "0MYZBQ5V0N",
+  "XKFSYWUUJH", "TCSXIADGFY", "I7WL3IRZ2D",
+  "MS43M4BS67", "EAMVCMJN16", "448XAQ08HH",
+  "PD01F5RJZY", "RWD4OWANDD", "4LR46OH645",
+  "QQKLTVCCWQ", "9TKLYKY2CN", "9L6UZT157I",
+  "FNSXIS55K6", "SZBTARZOTT", "0AB6ND0BQK",
+  "SEXFHSHXDK", "CK8O765LMD", "ZYUKTC5E9A",
+  "DY5PSZOT75", "7ROLXPTJ9U", "GYVVDUYOF8",
+  "H0B8E0091C", "BGNCA8RKML", "EKTY2PY5DM",
+  "LJCZYNBWQI"
+];
+
+const unusedCodes = new Set(discountCodes);
 const payments = new Map();
+const assignedCodes = new Set();
+
+let approvedCount = 0;
+let rejectedCount = 0;
+let bot = null;
+
+function getStats() {
+  return [
+    "📊 آمار CP HUB",
+    `✅ پرداخت‌های تأییدشده: ${approvedCount}`,
+    `❌ پرداخت‌های ردشده: ${rejectedCount}`,
+    `🎟️ کدهای باقی‌مانده: ${unusedCodes.size}`,
+    `📦 تعداد اولیه کدها: ${discountCodes.length}`
+  ].join("\n");
+}
+
+async function sendStats() {
+  if (!bot) return;
+  await bot.sendMessage(ADMIN_CHAT_ID, getStats());
+}
+
+function assignCode(payment) {
+  if (payment.discountCode) {
+    return payment.discountCode;
+  }
+
+  const code = unusedCodes.values().next().value;
+  if (!code) return null;
+
+  unusedCodes.delete(code);
+  assignedCodes.add(code);
+  payment.discountCode = code;
+
+  return code;
+}
 
 if (BOT_TOKEN && ADMIN_CHAT_ID) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-  bot.on("polling_error", (error) => {
+  bot.on("polling_error", error => {
     console.error("Telegram polling error:", error.message);
   });
 
-  bot.on("callback_query", async (query) => {
-    const data = query.data || "";
-    const parts = data.split(":");
-
-    if (parts.length !== 3 || parts[0] !== "payment") {
-      return;
-    }
-
-    const [, action, paymentId] = parts;
-
-    if (String(query.from.id) !== String(ADMIN_CHAT_ID)) {
-      await bot.answerCallbackQuery(query.id, {
-        text: "اجازه دسترسی ندارید."
-      });
-      return;
-    }
-
-    const payment = payments.get(paymentId);
-
-    if (!payment) {
-      await bot.answerCallbackQuery(query.id, {
-        text: "درخواست پیدا نشد یا سرور دوباره راه‌اندازی شده است."
-      });
-      return;
-    }
-
-    if (payment.status !== "pending") {
-      await bot.answerCallbackQuery(query.id, {
-        text: "این درخواست قبلاً بررسی شده است."
-      });
-      return;
-    }
-
-    if (action !== "approve" && action !== "reject") {
-      return;
-    }
-
-    payment.status = action === "approve" ? "approved" : "rejected";
-    payment.reviewedAt = new Date().toISOString();
-
+  bot.on("callback_query", async query => {
     try {
-      await bot.editMessageReplyMarkup(
-        { inline_keyboard: [] },
-        {
-          chat_id: ADMIN_CHAT_ID,
-          message_id: query.message.message_id
+      const parts = (query.data || "").split(":");
+      if (parts.length !== 3 || parts[0] !== "payment") return;
+
+      const [, action, paymentId] = parts;
+
+      if (String(query.from.id) !== String(ADMIN_CHAT_ID)) {
+        await bot.answerCallbackQuery(query.id, {
+          text: "اجازه دسترسی ندارید."
+        });
+        return;
+      }
+
+      const payment = payments.get(paymentId);
+
+      if (!payment) {
+        await bot.answerCallbackQuery(query.id, {
+          text: "درخواست پیدا نشد؛ ممکن است سرور دوباره راه‌اندازی شده باشد."
+        });
+        return;
+      }
+
+      if (payment.status !== "pending") {
+        await bot.answerCallbackQuery(query.id, {
+          text: "این درخواست قبلاً بررسی شده است."
+        });
+        return;
+      }
+
+      if (action !== "approve" && action !== "reject") return;
+
+      if (action === "approve") {
+        const code = assignCode(payment);
+
+        if (!code) {
+          await bot.answerCallbackQuery(query.id, {
+            text: "کد تخفیف باقی نمانده است."
+          });
+          await bot.sendMessage(
+            ADMIN_CHAT_ID,
+            "⚠️ پرداخت تأیید نشد؛ کد تخفیفی برای اختصاص باقی نمانده است."
+          );
+          return;
         }
-      );
+
+        payment.status = "approved";
+        payment.reviewedAt = new Date().toISOString();
+        approvedCount++;
+      } else {
+        payment.status = "rejected";
+        payment.reviewedAt = new Date().toISOString();
+        rejectedCount++;
+      }
+
+      try {
+        await bot.editMessageReplyMarkup(
+          { inline_keyboard: [] },
+          {
+            chat_id: query.message.chat.id,
+            message_id: query.message.message_id
+          }
+        );
+      } catch (error) {
+        console.error("Telegram markup update error:", error.message);
+      }
+
+      await bot.answerCallbackQuery(query.id, {
+        text: action === "approve" ? "پرداخت تأیید شد." : "پرداخت رد شد."
+      });
+
+      if (action === "approve") {
+        await bot.sendMessage(
+          ADMIN_CHAT_ID,
+          [
+            "✅ پرداخت تأیید شد.",
+            `🆔 درخواست: ${paymentId}`,
+            `🎟️ کد اختصاص‌یافته: ${payment.discountCode}`,
+            "",
+            getStats()
+          ].join("\n")
+        );
+      } else {
+        await bot.sendMessage(
+          ADMIN_CHAT_ID,
+          `❌ پرداخت ${paymentId} رد شد.\n\n${getStats()}`
+        );
+      }
     } catch (error) {
-      console.error("Could not update Telegram message:", error.message);
+      console.error("Telegram callback error:", error.message);
     }
-
-    await bot.answerCallbackQuery(query.id, {
-      text: action === "approve" ? "پرداخت تأیید شد." : "پرداخت رد شد."
-    });
-
-    await bot.sendMessage(
-      ADMIN_CHAT_ID,
-      action === "approve"
-        ? `✅ پرداخت ${paymentId} تأیید شد.`
-        : `❌ پرداخت ${paymentId} رد شد.`
-    );
   });
 }
 
 app.get("/", (req, res) => {
-  res.json({
-    status: "online",
-    message: "سرور CP HUB فعال است"
-  });
+  res.json({ status: "online", message: "سرور CP HUB فعال است" });
 });
 
 app.get("/health", (req, res) => {
   res.json({ status: "online" });
 });
 
-// ثبت درخواست پرداخت و ارسال رسید برای مدیر
+// ثبت درخواست پرداخت
 app.post("/api/payments", async (req, res) => {
   try {
     if (!bot) {
@@ -164,7 +263,8 @@ app.post("/api/payments", async (req, res) => {
       userId: String(userId),
       amount: parsedAmount,
       status: "pending",
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      discountCode: null
     };
 
     payments.set(paymentId, payment);
@@ -180,27 +280,21 @@ app.post("/api/payments", async (req, res) => {
       "لطفاً رسید را بررسی کن."
     ].filter(Boolean).join("\n");
 
-    await bot.sendPhoto(
-      ADMIN_CHAT_ID,
-      imageBuffer,
-      {
-        caption,
-        reply_markup: {
-          inline_keyboard: [
-            [
-              {
-                text: "✅ تأیید پرداخت",
-                callback_data: `payment:approve:${paymentId}`
-              },
-              {
-                text: "❌ رد پرداخت",
-                callback_data: `payment:reject:${paymentId}`
-              }
-            ]
-          ]
-        }
+    await bot.sendPhoto(ADMIN_CHAT_ID, imageBuffer, {
+      caption,
+      reply_markup: {
+        inline_keyboard: [[
+          {
+            text: "✅ تأیید پرداخت",
+            callback_data: `payment:approve:${paymentId}`
+          },
+          {
+            text: "❌ رد پرداخت",
+            callback_data: `payment:reject:${paymentId}`
+          }
+        ]]
       }
-    );
+    });
 
     res.json({
       success: true,
@@ -210,7 +304,6 @@ app.post("/api/payments", async (req, res) => {
     });
   } catch (error) {
     console.error("Payment request error:", error.message);
-
     res.status(500).json({
       success: false,
       message: "ارسال درخواست پرداخت ناموفق بود."
@@ -218,7 +311,7 @@ app.post("/api/payments", async (req, res) => {
   }
 });
 
-// بررسی وضعیت پرداخت توسط برنامه
+// بررسی وضعیت و دریافت کد پس از تأیید
 app.get("/api/payments/:id/status", (req, res) => {
   const payment = payments.get(req.params.id);
 
@@ -236,14 +329,43 @@ app.get("/api/payments/:id/status", (req, res) => {
     });
   }
 
-  res.json({
+  const response = {
     success: true,
     paymentId: payment.id,
     status: payment.status
+  };
+
+  if (payment.status === "approved" && payment.discountCode) {
+    response.discountCode = payment.discountCode;
+    response.instruction =
+      "این کد تخفیف ۱۰۰٪ به تو می‌دهد. کد را در قسمت «کد تخفیف» پرداخت آنلاین بازار وارد کن. این کد اختصاصی است و فقط یک بار قابل استفاده خواهد بود.";
+  }
+
+  res.json(response);
+});
+
+// دریافت آمار توسط مدیر
+app.get("/api/admin/stats", (req, res) => {
+  const suppliedKey = req.get("x-admin-key");
+
+  if (!process.env.ADMIN_API_KEY ||
+      suppliedKey !== process.env.ADMIN_API_KEY) {
+    return res.status(401).json({
+      success: false,
+      message: "دسترسی مجاز نیست."
+    });
+  }
+
+  res.json({
+    success: true,
+    approvedCount,
+    rejectedCount,
+    remainingCodes: unusedCodes.size,
+    totalCodes: discountCodes.length
   });
 });
 
 app.listen(PORT, () => {
   console.log(`CP HUB server running on port ${PORT}`);
 });
-                                    
+        
